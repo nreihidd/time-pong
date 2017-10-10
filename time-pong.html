@@ -1,0 +1,253 @@
+<html>
+	<head>
+		<meta charset="utf-8"/>
+		<style>
+			html, body, #game {
+				width: 100%;
+				height: 100%;
+				padding: 0;
+				margin: 0;
+				border: 0;
+			}
+		</style>
+	</head>
+	<body>
+	<canvas id="game"></canvas>
+	<script>
+		// Game state is 5 floats
+		// 0, 1: ball x, y
+		// 2: left paddle y
+		// 3: right paddle y
+		// 4: score
+		
+		const HISTORY = 60;
+		const STATE_SIZE = 5;
+		let states = new Float32Array(STATE_SIZE * HISTORY);
+
+		let canvas = document.querySelector("#game");
+		let gl = canvas.getContext("webgl");
+		gl.getExtension("OES_texture_float");
+
+		window.onresize = evt => {
+			canvas.width = window.innerWidth;
+			canvas.height = window.innerHeight;
+			gl.viewport(0, 0, canvas.width, canvas.height);
+		}
+		window.onresize();
+		
+		let vertexShaderSource = `
+			precision mediump float;
+			attribute vec2 aVertexPosition;
+			varying vec2 vPosition;
+			void main() {
+				vPosition = aVertexPosition;
+				gl_Position = vec4(aVertexPosition, 0.0, 1.0);
+			}
+		`;
+
+		let fragmentShaderSource = `
+			#define HISTORY ${HISTORY.toFixed(1)}
+			#define STATE_SIZE ${STATE_SIZE}
+			precision mediump float;
+			uniform sampler2D uState;
+			uniform vec2 uTimeFocus;
+			uniform float uGlobalTime;
+			uniform int uTimeMode;
+			varying vec2 vPosition;
+			float getTime() {
+				if (uTimeMode == 1) {
+					return (vPosition.x + 1.0) / 2.0 * HISTORY;
+				}
+				if (uTimeMode == 2) {
+					return clamp(60.0 - distance(vPosition, uTimeFocus) / 2.0 * HISTORY, 0.0, HISTORY);
+				}
+				return 60.0;
+			}
+
+			bool inCircle(vec2 center, float radius) {
+				return length(vPosition - center) <= radius;
+			}
+
+			bool inRect(vec2 center, vec2 size) {
+				return abs(vPosition.x - center.x) < size.x / 2.0 && abs(vPosition.y - center.y) < size.y / 2.0;
+			}
+
+			float getStateValueAtTime(float time, int elementIndex) {
+				vec2 dim = vec2(300.0, 1.0);
+				int lowIndex = int(clamp(floor(time), 0.0, HISTORY - 2.0));
+				int highIndex = lowIndex + 1;
+				float interp = time - float(lowIndex);
+				float low = texture2D(uState, vec2(float(lowIndex * STATE_SIZE + elementIndex) + 0.5, 0.5) / dim).r;
+				float high = texture2D(uState, vec2(float(highIndex * STATE_SIZE + elementIndex) + 0.5, 0.5) / dim).r;
+				return mix(low, high, interp);
+			}
+
+			void main() {
+				float time = getTime();
+				vec2 circle_pos = vec2(getStateValueAtTime(time, 0), getStateValueAtTime(time, 1));
+				vec2 paddle_a = vec2(-1.0, getStateValueAtTime(time, 2));
+				vec2 paddle_b = vec2(1.0, getStateValueAtTime(time, 3));
+				gl_FragColor = vec4(time / HISTORY * cos((uGlobalTime + time) * 6.28 / HISTORY) * 0.5, 0.0, 0.0, 1.0);
+				if (inRect(circle_pos, vec2(0.05))) {
+					gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0);
+				} else if (inRect(paddle_a, vec2(0.05, 0.4))) {
+					gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0);
+				} else if (inRect(paddle_b, vec2(0.05, 0.4))) {
+					gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0);
+				}
+			}
+		`;
+
+		let vertexBuffer = gl.createBuffer();
+		gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+		gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+			-1, -1, 1, -1, 1, 1,
+			-1, -1, 1, 1, -1, 1
+		]), gl.STATIC_DRAW);
+
+		let program = gl.createProgram();
+		let fragShader = gl.createShader(gl.FRAGMENT_SHADER);
+		let vertShader = gl.createShader(gl.VERTEX_SHADER);
+		gl.shaderSource(fragShader, fragmentShaderSource);
+		gl.shaderSource(vertShader, vertexShaderSource);
+		gl.compileShader(fragShader);
+		gl.compileShader(vertShader);
+		gl.attachShader(program, fragShader);
+		console.log(gl.getShaderInfoLog(fragShader));
+		gl.attachShader(program, vertShader);
+		console.log(gl.getShaderInfoLog(vertShader));
+		gl.linkProgram(program);
+		console.log(gl.getProgramInfoLog(program));
+		
+		gl.useProgram(program);
+		gl.enableVertexAttribArray(gl.getAttribLocation(program, "aVertexPosition"));
+		gl.vertexAttribPointer(gl.getAttribLocation(program, "aVertexPosition"), 2, gl.FLOAT, false, 8, 0);
+
+		let texture = gl.createTexture();
+		gl.activeTexture(gl.TEXTURE0);
+		gl.bindTexture(gl.TEXTURE_2D, texture);
+		gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, states.length, 1, 0, gl.LUMINANCE, gl.FLOAT, states);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+		function draw() {
+			gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, states.length, 1, gl.LUMINANCE, gl.FLOAT, states);
+			gl.uniform1i(gl.getUniformLocation(program, "uState"), 0);
+			gl.uniform2fv(gl.getUniformLocation(program, "uTimeFocus"), timeFocus);
+			gl.uniform1f(gl.getUniformLocation(program, "uGlobalTime"), frameNumber);
+			gl.uniform1i(gl.getUniformLocation(program, "uTimeMode"), timeMode);
+			gl.drawArrays(gl.TRIANGLES, 0, 6);
+		}
+
+		let keysHeld = new Set();
+		window.onkeydown = evt => keysHeld.add(evt.keyCode);
+		window.onkeyup = evt => keysHeld.delete(evt.keyCode);
+		
+		let timeMode = 2;
+		window.addEventListener("keydown", evt => {
+			if (evt.keyCode === "T".charCodeAt(0)) {
+				timeMode = (timeMode + 1) % 3;
+			}
+		})
+
+		function shiftStates() {
+			for (let i = STATE_SIZE; i < states.length; i++) {
+				states[i - STATE_SIZE] = states[i];
+			}
+		}
+		let frameNumber = 0;
+		let ballVelX = 0.01;
+		let ballVelY = 0;
+		let ballWidth = 0.05;
+		let paddleSpeed = 0.03;
+		let paddleWidth = 0.05;
+		let paddleHeight = 0.4;
+		let timeFocus = [1.0, 0.0];
+		function advanceState(state) {
+			frameNumber += 1;
+			let [ballX, ballY, paddleA, paddleB, score] = state;
+			let oldBallX = ballX;
+			let oldBallY = ballY;
+			ballX += ballVelX;
+			ballY += ballVelY;
+
+			function reset() {
+				ballX = 0;
+				ballY = 0;
+				ballVelX = 0.01;
+				ballVelY = 0;
+			}
+
+			let leftPaddleBoundary = -1 + paddleWidth / 2 + ballWidth / 2;
+			if (ballX < leftPaddleBoundary && oldBallX >= leftPaddleBoundary) {
+				let ballYAtBoundary = oldBallY + (ballY - oldBallY) * (leftPaddleBoundary - oldBallX) / (ballX - oldBallX);
+				if (Math.abs(ballYAtBoundary - paddleA) > paddleHeight / 2 + ballWidth / 2) {
+					// Miss
+				} else {
+					ballX = leftPaddleBoundary;
+					ballY = ballYAtBoundary;
+					ballVelX = -ballVelX * 1.05;
+					ballVelY += (ballY - paddleA) / 10;
+				}
+			} else if (ballX <= -1) {
+				score += 1;
+				reset();
+			}
+
+			let rightPaddleBoundary = 1 - paddleWidth / 2 - ballWidth / 2;
+			if (ballX > rightPaddleBoundary && oldBallX <= rightPaddleBoundary) {
+				let ballYAtBoundary = oldBallY + (ballY - oldBallY) * (rightPaddleBoundary - oldBallX) / (ballX - oldBallX);
+				if (Math.abs(ballYAtBoundary - paddleB) > paddleHeight / 2 + ballWidth / 2) {
+					// Miss
+				} else {
+					ballX = rightPaddleBoundary;
+					ballY = ballYAtBoundary;
+					ballVelX = -ballVelX * 1.05;
+					ballVelY += (ballY - paddleB) / 10;
+				}
+			} else if (ballX >= 1) {
+				score -= 1;
+				reset();
+			}
+
+			if (ballY < -1.0 + ballWidth / 2) {
+				ballY = -1.0 + ballWidth / 2;
+				ballVelY = -ballVelY * 1;
+			}
+			if (ballY > 1.0 - ballWidth / 2) {
+				ballY = 1.0 - ballWidth / 2;
+				ballVelY = -ballVelY * 1;
+			}
+			if (keysHeld.has("W".charCodeAt(0))) {
+				paddleB += paddleSpeed;
+			}
+			if (keysHeld.has("S".charCodeAt(0))) {
+				paddleB -= paddleSpeed;
+			}
+			let aiDiff = ballY - paddleA;
+			paddleA += Math.min(Math.max(aiDiff, -paddleSpeed), paddleSpeed);
+			paddleA = Math.min(Math.max(paddleA, -1 + paddleHeight / 2), 1 - paddleHeight / 2);
+			paddleB = Math.min(Math.max(paddleB, -1 + paddleHeight / 2), 1 - paddleHeight / 2);
+			state.set([ballX, ballY, paddleA, paddleB, score]);
+
+			timeFocus = [1, paddleB];
+		}
+		
+		function nextState() {
+			shiftStates();
+			let state = states.subarray(states.length - STATE_SIZE);
+			advanceState(state);
+		}
+
+		function update() {
+			requestAnimationFrame(update);
+			nextState();
+			draw();
+		}
+		update();
+		
+	</script>
+	</body>
+</html>
